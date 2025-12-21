@@ -1,0 +1,59 @@
+{
+  "name": "qd.db",
+  "version": "6.0.0",
+  "description": "High-performance key-value database with JSON and SQLite support, featuring intelligent caching, batch operations, and optimized data handling for all sizes",
+  "main": "src/index.js",
+  "types": "types/index.d.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "database",
+    "key-value",
+    "json",
+    "sqlite",
+    "cache",
+    "nosql",
+    "embedded",
+    "local-storage",
+    "data-storage",
+    "high-performance",
+    "batch-operations",
+    "transactions",
+    "streaming",
+    "discord-bot",
+    "qd.db",
+    "quantum",
+    "quantum-developers"
+  ],
+  "author": "Mr, Na3san",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mr-na3san/qd.db.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mr-na3san/qd.db/issues"
+  },
+  "homepage": "https://github.com/mr-na3san/qd.db#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "write-file-atomic": "^5.0.1"
+  },
+  "files": [
+    "src/",
+    "types/",
+    "LICENSE",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "require": "./src/index.js",
+      "import": "./src/index.js",
+      "types": "./types/index.d.ts"
+    }
+  }
+}
