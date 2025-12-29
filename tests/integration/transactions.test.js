@@ -2,22 +2,22 @@ const { QuantumDB } = require('../../src/index');
 const fs = require('fs');
 const path = require('path');
 
-const TEST_DB = path.join(__dirname, 'test-transactions.db');
+const testDB = path.join(__dirname, 'test-transactions.db');
 
 describe('Transactions - Basic Operations', () => {
   let db;
 
   beforeEach(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
-    db = new QuantumDB(TEST_DB);
+    db = new QuantumDB(testDB);
   });
 
   afterEach(async () => {
     await db.destroy();
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
@@ -85,16 +85,16 @@ describe('Transactions - Isolation', () => {
   let db;
 
   beforeEach(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
-    db = new QuantumDB(TEST_DB);
+    db = new QuantumDB(testDB);
   });
 
   afterEach(async () => {
     await db.destroy();
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
@@ -149,16 +149,16 @@ describe('Transactions - Cache Consistency', () => {
   let db;
 
   beforeEach(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
-    db = new QuantumDB(TEST_DB, { cache: true, cacheSize: 100 });
+    db = new QuantumDB(testDB, { cache: true, cacheSize: 100 });
   });
 
   afterEach(async () => {
     await db.destroy();
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
@@ -195,16 +195,16 @@ describe('Transactions - Batch Integration', () => {
   let db;
 
   beforeEach(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
-    db = new QuantumDB(TEST_DB, { batch: true, batchSize: 10 });
+    db = new QuantumDB(testDB, { batch: true, batchSize: 10 });
   });
 
   afterEach(async () => {
     await db.destroy();
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
@@ -223,16 +223,16 @@ describe('Transactions - Complex Operations', () => {
   let db;
 
   beforeEach(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
-    db = new QuantumDB(TEST_DB);
+    db = new QuantumDB(testDB);
   });
 
   afterEach(async () => {
     await db.destroy();
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
@@ -299,16 +299,16 @@ describe('Transactions - Error Cases', () => {
   let db;
 
   beforeEach(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
-    db = new QuantumDB(TEST_DB);
+    db = new QuantumDB(testDB);
   });
 
   afterEach(async () => {
     await db.destroy();
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
