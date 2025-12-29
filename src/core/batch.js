@@ -12,6 +12,7 @@ class BatchManager {
     this.queue = [];
     this.timer = null;
     this.isProcessing = false;
+    this.processingPromise = null;
   }
 
   /**
@@ -24,15 +25,26 @@ class BatchManager {
       this.queue.push({ operation, resolve, reject });
 
       if (this.queue.length >= this.maxBatchSize) {
-        this.flush();
-      } else if (!this.timer) {
-        this.timer = setTimeout(() => this.flush(), this.maxWaitTime);
+        this.scheduleFlush();
+      } else if (!this.timer && !this.isProcessing) {
+        this.timer = setTimeout(() => this.scheduleFlush(), this.maxWaitTime);
       }
     });
   }
 
   /**
-   * Flush all pending operations
+   * Schedule flush operation
+   * @private
+   */
+  async scheduleFlush() {
+    if (this.isProcessing) {
+      await this.processingPromise;
+    }
+    await this.flush();
+  }
+
+  /**
+   * Flush pending operations
    * @returns {Promise} Promise that resolves when flush completes
    */
   async flush() {
@@ -41,21 +53,32 @@ class BatchManager {
       this.timer = null;
     }
 
-    if (this.queue.length === 0 || this.isProcessing) {
+    if (this.queue.length === 0) {
       return;
     }
 
     this.isProcessing = true;
-    const batch = this.queue.splice(0);
+    
+    const batchSize = Math.min(this.queue.length, this.maxBatchSize);
+    const batch = this.queue.splice(0, batchSize);
 
-    try {
-      await this.executeCallback(batch.map(item => item.operation));
-      batch.forEach(item => item.resolve());
-    } catch (error) {
-      batch.forEach(item => item.reject(error));
-    } finally {
-      this.isProcessing = false;
-    }
+    this.processingPromise = (async () => {
+      try {
+        await this.executeCallback(batch.map(item => item.operation));
+        batch.forEach(item => item.resolve());
+      } catch (error) {
+        batch.forEach(item => item.reject(error));
+      } finally {
+        this.isProcessing = false;
+        this.processingPromise = null;
+        
+        if (this.queue.length > 0) {
+          setImmediate(() => this.flush());
+        }
+      }
+    })();
+
+    await this.processingPromise;
   }
 
   /**
@@ -67,7 +90,7 @@ class BatchManager {
   }
 
   /**
-   * Clear queue
+   * Clear queue without executing
    */
   clear() {
     if (this.timer) {
