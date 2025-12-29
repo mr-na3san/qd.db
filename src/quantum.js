@@ -1,8 +1,17 @@
 const DatabaseConnection = require('./core/database');
 const CacheManager = require('./core/cache');
 const BatchManager = require('./core/batch');
+const BackupManager = require('./core/backup');
+const WatcherManager = require('./core/watcher');
+const QueryBuilder = require('./core/query');
 const operations = require('./core/operations');
 const { TransactionError } = require('./utils/errors');
+
+const allowedOptions = new Set([
+  'cache', 'cacheSize', 'cacheTTL', 'cacheMaxMemoryMB',
+  'batch', 'batchSize', 'batchDelay',
+  'keepConnectionOpen', 'timeout'
+]);
 
 class QuantumDB {
   /**
@@ -10,13 +19,18 @@ class QuantumDB {
    * @param {string} [filename='quantum.sqlite'] Database file path
    * @param {Object} [options={}] Database options
    * @param {boolean} [options.cache=true] Enable cache
-   * @param {number} [options.cacheSize=1000] Cache size
+   * @param {number} [options.cacheSize=1000] Maximum cache entries
+   * @param {number} [options.cacheTTL=0] Cache TTL in milliseconds (0 = no expiry)
+   * @param {number} [options.cacheMaxMemoryMB=100] Maximum cache memory in MB
    * @param {boolean} [options.batch=true] Enable batch operations
-   * @param {number} [options.batchSize=100] Batch size
+   * @param {number} [options.batchSize=100] Maximum batch size
    * @param {number} [options.batchDelay=50] Batch delay in ms
    * @param {boolean} [options.keepConnectionOpen=true] Keep SQLite connection open
+   * @param {number} [options.timeout=5000] Operation timeout in ms
    */
   constructor(filename = 'quantum.sqlite', options = {}) {
+    this.validateOptions(options);
+
     this.db = new DatabaseConnection(filename, {
       keepConnectionOpen: options.keepConnectionOpen ?? true,
       timeout: options.timeout ?? 5000
@@ -25,13 +39,22 @@ class QuantumDB {
     this.options = {
       cache: options.cache ?? true,
       cacheSize: options.cacheSize ?? 1000,
+      cacheTTL: options.cacheTTL ?? 0,
+      cacheMaxMemoryMB: options.cacheMaxMemoryMB ?? 100,
       batch: options.batch ?? true,
       batchSize: options.batchSize ?? 100,
       batchDelay: options.batchDelay ?? 50,
-      ...options
+      keepConnectionOpen: options.keepConnectionOpen ?? true,
+      timeout: options.timeout ?? 5000
     };
 
-    this.cache = this.options.cache ? new CacheManager(this.options.cacheSize) : null;
+    this.cache = this.options.cache 
+      ? new CacheManager({
+          maxSize: this.options.cacheSize,
+          ttl: this.options.cacheTTL,
+          maxMemoryMB: this.options.cacheMaxMemoryMB
+        })
+      : null;
 
     if (this.options.batch) {
       this.writeBatch = new BatchManager(
@@ -46,12 +69,29 @@ class QuantumDB {
       this.writeBatch = null;
     }
 
+    this.backupManager = new BackupManager(this.db);
+    this.watcherManager = new WatcherManager();
+
     this.stats = {
       reads: 0,
       writes: 0,
       deletes: 0,
       startTime: Date.now()
     };
+  }
+
+  /**
+   * Validate options
+   * @private
+   */
+  validateOptions(options) {
+    const unknownOptions = Object.keys(options).filter(
+      key => !allowedOptions.has(key)
+    );
+    
+    if (unknownOptions.length > 0) {
+      console.warn(`[QuantumDB] Unknown options: ${unknownOptions.join(', ')}`);
+    }
   }
 
   /**
@@ -73,10 +113,27 @@ class QuantumDB {
    */
   async set(key, value) {
     this.stats.writes++;
-    if (this.writeBatch) {
-      return this.writeBatch.add({ key, value });
+    
+    const oldValue = this.cache ? this.cache.get(key) : undefined;
+    
+    if (this.cache) {
+      this.cache.set(key, value);
     }
-    return operations.set(this.db, key, value, this.cache);
+    
+    if (this.writeBatch) {
+      const promise = this.writeBatch.add({ key, value }).catch(err => {
+        if (this.cache) {
+          this.cache.delete(key);
+        }
+        throw err;
+      });
+      
+      this.watcherManager.notify('set', key, value, oldValue);
+      return promise;
+    }
+    
+    await operations.set(this.db, key, value, this.cache);
+    this.watcherManager.notify('set', key, value, oldValue);
   }
 
   /**
@@ -86,7 +143,17 @@ class QuantumDB {
    */
   async push(key, value) {
     this.stats.writes++;
-    return operations.push(this.db, key, value, this.cache);
+    
+    if (this.writeBatch) {
+      const current = await this.get(key);
+      const array = Array.isArray(current) ? current : [];
+      array.push(value);
+      return this.set(key, array);
+    }
+    
+    const oldValue = await this.get(key);
+    await operations.push(this.db, key, value, this.cache);
+    this.watcherManager.notify('push', key, value, oldValue);
   }
 
   /**
@@ -96,7 +163,20 @@ class QuantumDB {
    */
   async pull(key, value) {
     this.stats.writes++;
-    return operations.pull(this.db, key, value, this.cache);
+    
+    if (this.writeBatch) {
+      const current = await this.get(key);
+      if (!Array.isArray(current)) {
+        const { NotArrayError } = require('./utils/errors');
+        throw new NotArrayError();
+      }
+      const filtered = current.filter(item => item !== value);
+      return this.set(key, filtered);
+    }
+    
+    const oldValue = await this.get(key);
+    await operations.pull(this.db, key, value, this.cache);
+    this.watcherManager.notify('pull', key, value, oldValue);
   }
 
   /**
@@ -105,7 +185,9 @@ class QuantumDB {
    */
   async delete(key) {
     this.stats.deletes++;
-    return operations.deleteKey(this.db, key, this.cache);
+    const oldValue = await this.get(key);
+    await operations.deleteKey(this.db, key, this.cache);
+    this.watcherManager.notify('delete', key, undefined, oldValue);
   }
 
   /**
@@ -114,7 +196,10 @@ class QuantumDB {
    */
   async bulkDelete(keys) {
     this.stats.deletes += keys.length;
-    return operations.bulkDelete(this.db, keys, this.cache);
+    await operations.bulkDelete(this.db, keys, this.cache);
+    keys.forEach(key => {
+      this.watcherManager.notify('delete', key, undefined);
+    });
   }
 
   /**
@@ -123,7 +208,17 @@ class QuantumDB {
    */
   async bulkSet(entries) {
     this.stats.writes += entries.length;
-    return operations.bulkSet(this.db, entries, this.cache);
+    
+    if (this.cache) {
+      entries.forEach(({ key, value }) => {
+        this.cache.set(key, value);
+      });
+    }
+    
+    await operations.bulkSet(this.db, entries, this.cache);
+    entries.forEach(({ key, value }) => {
+      this.watcherManager.notify('set', key, value);
+    });
   }
 
   /**
@@ -140,7 +235,8 @@ class QuantumDB {
    */
   async clear() {
     this.stats.deletes++;
-    return operations.clearAll(this.db, this.cache);
+    await operations.clearAll(this.db, this.cache);
+    this.watcherManager.notify('clear', '*');
   }
 
   /**
@@ -151,7 +247,18 @@ class QuantumDB {
    */
   async add(key, amount = 1) {
     this.stats.writes++;
-    return operations.add(this.db, key, amount, this.cache);
+    
+    if (this.writeBatch) {
+      const current = await this.get(key);
+      const newValue = (current || 0) + amount;
+      await this.set(key, newValue);
+      return newValue;
+    }
+    
+    const oldValue = await this.get(key);
+    const newValue = await operations.add(this.db, key, amount, this.cache);
+    this.watcherManager.notify('add', key, newValue, oldValue);
+    return newValue;
   }
 
   /**
@@ -162,7 +269,18 @@ class QuantumDB {
    */
   async subtract(key, amount = 1) {
     this.stats.writes++;
-    return operations.subtract(this.db, key, amount, this.cache);
+    
+    if (this.writeBatch) {
+      const current = await this.get(key);
+      const newValue = (current || 0) - amount;
+      await this.set(key, newValue);
+      return newValue;
+    }
+    
+    const oldValue = await this.get(key);
+    const newValue = await operations.subtract(this.db, key, amount, this.cache);
+    this.watcherManager.notify('subtract', key, newValue, oldValue);
+    return newValue;
   }
 
   /**
@@ -203,49 +321,204 @@ class QuantumDB {
   }
 
   /**
-   * Execute operations in a transaction
+   * Execute operations in a transaction (SQLite only)
    * @param {Function} callback Transaction callback
    * @returns {Promise<any>} Transaction result
    */
   async transaction(callback) {
-    const txOps = [];
-    const txCache = new Map();
+    if (this.db.isJSON) {
+      throw new TransactionError('Transactions are only supported with SQLite backend');
+    }
 
+    if (this.writeBatch) {
+      await this.writeBatch.flush();
+    }
+
+    await this.db.connect();
+    const sqlDb = this.db.db;
+    
+    if (!sqlDb) {
+      throw new TransactionError('Database connection not available');
+    }
+
+    sqlDb.prepare('BEGIN IMMEDIATE').run();
+    
     const txProxy = {
       get: async (key) => {
-        if (txCache.has(key)) return txCache.get(key);
-        const value = await this.get(key);
-        txCache.set(key, value);
-        return value;
+        const stmt = sqlDb.prepare('SELECT value FROM data WHERE key = ?');
+        const row = stmt.get(key);
+        if (!row) return undefined;
+        const Serializer = require('./utils/serializer');
+        return Serializer.deserialize(row.value);
       },
       set: (key, value) => {
-        txCache.set(key, value);
-        txOps.push({ type: 'set', key, value });
+        const { validateKey, validateValue } = require('./utils/helpers');
+        validateKey(key);
+        validateValue(value);
+        const Serializer = require('./utils/serializer');
+        const stmt = sqlDb.prepare('INSERT OR REPLACE INTO data (key, value) VALUES (?, ?)');
+        stmt.run(key, Serializer.serialize(value));
+        
+        if (this.cache) {
+          this.cache.set(key, value);
+        }
       },
       delete: (key) => {
-        txCache.delete(key);
-        txOps.push({ type: 'delete', key });
+        const { validateKey } = require('./utils/helpers');
+        validateKey(key);
+        const stmt = sqlDb.prepare('DELETE FROM data WHERE key = ?');
+        stmt.run(key);
+        
+        if (this.cache) {
+          this.cache.delete(key);
+        }
       }
     };
 
     try {
       const result = await callback(txProxy);
-
-      const setOps = txOps.filter(op => op.type === 'set');
-      const deleteOps = txOps.filter(op => op.type === 'delete');
-
-      if (setOps.length > 0) {
-        await this.bulkSet(setOps.map(op => ({ key: op.key, value: op.value })));
-      }
-
-      if (deleteOps.length > 0) {
-        await this.bulkDelete(deleteOps.map(op => op.key));
-      }
-
+      sqlDb.prepare('COMMIT').run();
       return result;
     } catch (error) {
+      sqlDb.prepare('ROLLBACK').run();
+      
+      if (this.cache) {
+        this.cache.clear();
+      }
+      
       throw new TransactionError(error.message);
     }
+  }
+
+  /**
+   * Watch key pattern for changes
+   * @param {string|RegExp} pattern Key pattern to watch
+   * @param {Function} callback Callback function
+   * @returns {number} Watcher ID
+   */
+  watch(pattern, callback) {
+    return this.watcherManager.watch(pattern, callback);
+  }
+
+  /**
+   * Remove watcher
+   * @param {number} id Watcher ID
+   * @returns {boolean} True if watcher was removed
+   */
+  unwatch(id) {
+    return this.watcherManager.unwatch(id);
+  }
+
+  /**
+   * Listen to database events
+   * @param {string} event Event name (set, delete, push, pull, add, subtract, clear)
+   * @param {Function} callback Event callback
+   */
+  on(event, callback) {
+    this.watcherManager.on(event, callback);
+  }
+
+  /**
+   * Remove event listener
+   * @param {string} event Event name
+   * @param {Function} callback Event callback
+   */
+  off(event, callback) {
+    this.watcherManager.off(event, callback);
+  }
+
+  /**
+   * Create backup of database
+   * @param {string} backupPath Path to backup file
+   * @returns {Promise<Object>} Backup metadata
+   */
+  async backup(backupPath) {
+    if (this.writeBatch) {
+      await this.writeBatch.flush();
+    }
+    return this.backupManager.createBackup(backupPath);
+  }
+
+  /**
+   * Restore database from backup
+   * @param {string} backupPath Path to backup file
+   * @param {Object} [options] Restore options
+   * @param {boolean} [options.merge=false] Merge with existing data
+   * @returns {Promise<Object>} Restore metadata
+   */
+  async restore(backupPath, options) {
+    if (this.writeBatch) {
+      await this.writeBatch.flush();
+    }
+    
+    const result = await this.backupManager.restore(backupPath, options);
+    
+    if (this.cache) {
+      this.cache.clear();
+    }
+    
+    return result;
+  }
+
+  /**
+   * List available backups
+   * @param {string} backupDir Directory containing backups
+   * @returns {Promise<Array>} List of backup metadata
+   */
+  async listBackups(backupDir) {
+    return this.backupManager.listBackups(backupDir);
+  }
+
+  /**
+   * Warm cache with keys
+   * @param {Array<string>|string} patterns Key patterns to warm
+   */
+  async warmCache(patterns) {
+    if (!this.cache) return;
+
+    const allData = await this.db.readData();
+    const entries = Object.entries(allData);
+    
+    if (!patterns) {
+      const toCache = entries.slice(0, this.options.cacheSize);
+      toCache.forEach(([key, value]) => {
+        this.cache.set(key, value);
+      });
+      return;
+    }
+
+    const patternsArray = Array.isArray(patterns) ? patterns : [patterns];
+    const matchers = patternsArray.map(p => {
+      if (typeof p === 'string' && p.includes('*')) {
+        const regexPattern = p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+        return new RegExp(`^${regexPattern}$`);
+      }
+      return p;
+    });
+
+    for (const [key, value] of entries) {
+      for (const matcher of matchers) {
+        if (typeof matcher === 'string') {
+          if (key === matcher || key.startsWith(matcher)) {
+            this.cache.set(key, value);
+            break;
+          }
+        } else if (matcher instanceof RegExp) {
+          if (matcher.test(key)) {
+            this.cache.set(key, value);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Create query builder
+   * @returns {QueryBuilder} Query builder instance
+   */
+  query() {
+    return new QueryBuilder(this);
   }
 
   /**
@@ -270,7 +543,8 @@ class QuantumDB {
       deletes: this.stats.deletes,
       uptime: Math.floor(uptime / 1000) + 's',
       cache: this.cache ? this.cache.getStats() : null,
-      batchQueue: this.writeBatch ? this.writeBatch.size() : 0
+      batchQueue: this.writeBatch ? this.writeBatch.size() : 0,
+      watchers: this.watcherManager.getWatcherCount()
     };
   }
 
@@ -300,14 +574,25 @@ class QuantumDB {
 
   /**
    * Destroy database connection
+   * @param {Object} [options] Destroy options
+   * @param {boolean} [options.flush=true] Flush pending operations before destroy
    */
-  destroy() {
+  async destroy(options = {}) {
+    const shouldFlush = options.flush !== false;
+
     if (this.writeBatch) {
-      this.writeBatch.clear();
+      if (shouldFlush) {
+        await this.writeBatch.flush();
+      } else {
+        this.writeBatch.clear();
+      }
     }
+    
     if (this.cache) {
-      this.cache.clear();
+      this.cache.destroy();
     }
+
+    this.watcherManager.clearWatchers();
     this.db.destroy();
   }
 }
