@@ -1,11 +1,16 @@
 {
   "name": "qd.db",
-  "version": "6.0.0",
-  "description": "High-performance key-value database with JSON and SQLite support, featuring intelligent caching, batch operations, and optimized data handling for all sizes",
+  "version": "6.2.0",
+  "description": "High-performance key-value database with JSON and SQLite support, featuring intelligent caching, batch operations, transactions, backup/restore, query builder, and real-time watchers",
   "main": "src/index.js",
   "types": "types/index.d.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:unit": "jest tests/unit",
+    "test:integration": "jest tests/integration",
+    "test:performance": "jest tests/performance"
   },
   "keywords": [
     "database",
@@ -21,6 +26,12 @@
     "batch-operations",
     "transactions",
     "streaming",
+    "backup",
+    "restore",
+    "watchers",
+    "events",
+    "lru-cache",
+    "query-builder",
     "discord-bot",
     "qd.db",
     "quantum",
@@ -42,6 +53,9 @@
   "dependencies": {
     "better-sqlite3": "^11.9.1",
     "write-file-atomic": "^5.0.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   },
   "files": [
     "src/",
