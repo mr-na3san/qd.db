@@ -3,7 +3,7 @@ const CacheManager = require('../../src/core/cache');
 const fs = require('fs');
 const path = require('path');
 
-const TEST_DB = path.join(__dirname, 'test-performance.db');
+const testDB = path.join(__dirname, 'test-performance.db');
 
 describe('Performance - Cache Operations', () => {
   test('should perform 100k operations in < 500ms', () => {
@@ -83,8 +83,8 @@ describe('Performance - Batch Operations', () => {
   let db;
 
   beforeEach(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
@@ -92,15 +92,15 @@ describe('Performance - Batch Operations', () => {
     if (db) {
       await db.destroy();
     }
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
   test('batch should be significantly faster than individual operations', async () => {
     const operations = 1000;
     
-    const db1 = new QuantumDB(TEST_DB + '.nobatch', { 
+    const db1 = new QuantumDB(testDB + '.nobatch', { 
       batch: false,
       cache: false 
     });
@@ -112,11 +112,11 @@ describe('Performance - Batch Operations', () => {
     const duration1 = Date.now() - start1;
     
     await db1.destroy();
-    if (fs.existsSync(TEST_DB + '.nobatch')) {
-      fs.unlinkSync(TEST_DB + '.nobatch');
+    if (fs.existsSync(testDB + '.nobatch')) {
+      fs.unlinkSync(testDB + '.nobatch');
     }
     
-    const db2 = new QuantumDB(TEST_DB + '.batch', { 
+    const db2 = new QuantumDB(testDB + '.batch', { 
       batch: true,
       batchSize: 100,
       cache: false 
@@ -130,8 +130,8 @@ describe('Performance - Batch Operations', () => {
     const duration2 = Date.now() - start2;
     
     await db2.destroy();
-    if (fs.existsSync(TEST_DB + '.batch')) {
-      fs.unlinkSync(TEST_DB + '.batch');
+    if (fs.existsSync(testDB + '.batch')) {
+      fs.unlinkSync(testDB + '.batch');
     }
     
     const speedup = duration1 / duration2;
@@ -144,7 +144,7 @@ describe('Performance - Batch Operations', () => {
   });
 
   test('should handle burst writes efficiently', async () => {
-    db = new QuantumDB(TEST_DB, { 
+    db = new QuantumDB(testDB, { 
       batch: true,
       batchSize: 100,
       cache: true 
@@ -170,11 +170,11 @@ describe('Performance - Query Operations', () => {
   let db;
 
   beforeAll(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
     
-    db = new QuantumDB(TEST_DB, { cache: false });
+    db = new QuantumDB(testDB, { cache: false });
     
     for (let i = 1; i <= 1000; i++) {
       await db.set(`user:${i}`, {
@@ -188,8 +188,8 @@ describe('Performance - Query Operations', () => {
 
   afterAll(async () => {
     await db.destroy();
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
@@ -313,16 +313,16 @@ describe('Performance - Concurrent Operations', () => {
   let db;
 
   beforeEach(async () => {
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
-    db = new QuantumDB(TEST_DB, { batch: true, cache: true });
+    db = new QuantumDB(testDB, { batch: true, cache: true });
   });
 
   afterEach(async () => {
     await db.destroy();
-    if (fs.existsSync(TEST_DB)) {
-      fs.unlinkSync(TEST_DB);
+    if (fs.existsSync(testDB)) {
+      fs.unlinkSync(testDB);
     }
   });
 
