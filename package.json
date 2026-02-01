@@ -1,17 +1,9 @@
 {
   "name": "qd.db",
-  "version": "6.2.0",
+  "version": "6.2.1",
   "description": "High-performance key-value database with JSON and SQLite support, featuring intelligent caching, batch operations, transactions, backup/restore, query builder, and real-time watchers",
-  "main": "src/index.js",
+  "main": "index.js",
   "types": "types/index.d.ts",
-  "scripts": {
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage",
-    "test:unit": "jest tests/unit",
-    "test:integration": "jest tests/integration",
-    "test:performance": "jest tests/performance"
-  },
   "keywords": [
     "database",
     "key-value",
@@ -37,7 +29,7 @@
     "quantum",
     "quantum-developers"
   ],
-  "author": "Mr, Na3san",
+  "author": "Mr. Na3san",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -48,25 +40,22 @@
   },
   "homepage": "https://github.com/mr-na3san/qd.db#readme",
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=16.0.0"
   },
   "dependencies": {
     "better-sqlite3": "^11.9.1",
     "write-file-atomic": "^5.0.1"
   },
-  "devDependencies": {
-    "jest": "^29.7.0"
-  },
-  "files": [
-    "src/",
-    "types/",
-    "LICENSE",
-    "README.md"
-  ],
   "exports": {
     ".": {
-      "require": "./src/index.js",
-      "import": "./src/index.js",
+      "require": {
+        "types": "./types/index.d.ts",
+        "default": "./index.js"
+      },
+      "import": {
+        "types": "./types/index.d.ts",
+        "default": "./index.js"
+      },
       "types": "./types/index.d.ts"
     }
   }

@@ -2,11 +2,11 @@
   <img src="https://i.imgur.com/lWWDq2M.png" alt="QuantumDB Logo" width="350">
 </p>
 
-<h1 align="center">QuantumDB v6.2.0</h1>
+<h1 align="center">QuantumDB v6.2.x</h1>
 
 [![npm version](https://img.shields.io/npm/v/qd.db.svg)](https://www.npmjs.com/package/qd.db)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D14.0.0-brightgreen)](https://nodejs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen)](https://nodejs.org/)
 [![Test Coverage](https://img.shields.io/badge/coverage->80%25-brightgreen)](https://github.com/mr-na3san/qd.db)
 
 ## High-Performance Key-Value Database
@@ -15,7 +15,7 @@ A powerful and efficient key-value database supporting both JSON and SQLite back
 
 ---
 
-## 🎉 What's New in v6.2.0
+## 🎉 What's New in v6.2.x
 
 **Major upgrade from v6.0.0 with comprehensive improvements:**
 
@@ -30,12 +30,6 @@ const users = await db.query()
   .limit(10)
   .get();
 ```
-
-### ✅ Comprehensive Test Suite
-- **170+ test cases** covering all functionality
-- **>80% code coverage** for production confidence
-- Unit, integration, and performance tests
-- Automated testing with Jest
 
 ### 🔥 Performance Optimizations
 - **LRU cache now O(1)** with doubly-linked list (previously O(n))
@@ -80,7 +74,6 @@ const users = await db.query()
 - **Large Dataset Support:** Stream millions of records with minimal memory
 - **Backup/Restore:** Easy database backup and recovery
 - **Watchers & Events:** Real-time monitoring of database changes
-- **Fully Tested:** >80% test coverage with 170+ test cases
 - **Zero Config:** Works out of the box with sensible defaults
 - **Production Ready:** Battle-tested security and error handling
 
@@ -99,43 +92,37 @@ npm install qd.db
 ```javascript
 const { QuantumDB } = require('qd.db');
 
-const db = new QuantumDB('mydata.db');
+(async () => {
+  const db = new QuantumDB('mydata.db');
 
-// Basic operations
-await db.set('user:1', { name: 'Ahmed', age: 25, city: 'Cairo' });
-const user = await db.get('user:1');
+  await db.set('user:1', { name: 'Ahmed', age: 25, city: 'Cairo' });
+  const user = await db.get('user:1');
 
-// Query Builder (NEW!)
-const adults = await db.query()
-  .prefix('user:')
-  .where('age', '>=', 18)
-  .sort('name')
-  .get();
+  const adults = await db.query()
+    .prefix('user:')
+    .where('age', '>=', 18)
+    .sort('name')
+    .get();
 
-// Array operations
-await db.push('todos', 'Buy milk');
-await db.pull('todos', 'Buy milk');
+  await db.push('todos', 'Buy milk');
+  await db.pull('todos', 'Buy milk');
 
-// Number operations
-await db.add('visits', 1);
-await db.subtract('balance', 50);
+  await db.add('visits', 1);
+  await db.subtract('balance', 50);
 
-// Transactions (NEW!)
-await db.transaction(async (tx) => {
-  const balance = await tx.get('balance');
-  tx.set('balance', balance + 100);
-});
+  await db.transaction(async (tx) => {
+    const balance = await tx.get('balance');
+    tx.set('balance', balance + 100);
+  });
 
-// Backup (NEW!)
-await db.backup('./backup.json');
+  await db.backup('./backup.json');
 
-// Watchers (NEW!)
-db.watch('user:*', (event) => {
-  console.log('User changed:', event);
-});
+  db.watch('user:*', (event) => {
+    console.log('User changed:', event);
+  });
 
-// Statistics
-console.log(db.getStats());
+  console.log(db.getStats());
+})();
 ```
 
 ---
@@ -147,6 +134,9 @@ console.log(db.getStats());
 - [API Reference](#-api-reference)
   - [Constructor](#constructor)
   - [Basic Operations](#basic-operations)
+  - [Bulk Operations](#bulk-operations)
+  - [Find Operations](#find-operations)
+  - [Stream Operations](#stream-operations)
   - [Query Builder](#query-builder-new-in-v620)
   - [Array Operations](#array-operations)
   - [Number Operations](#number-operations)
@@ -182,11 +172,12 @@ const db = new QuantumDB(filename, options);
 |--------|------|---------|-------------|
 | `cache` | boolean | `true` | Enable LRU caching |
 | `cacheSize` | number | `1000` | Maximum cache entries |
-| `cacheTTL` | number | `0` | Cache TTL in ms (0 = no expiry) ⭐ NEW |
-| `cacheMaxMemoryMB` | number | `100` | Maximum cache memory in MB ⭐ NEW |
+| `cacheTTL` | number | `0` | Cache TTL in ms (0 = no expiry) |
+| `cacheMaxMemoryMB` | number | `100` | Maximum cache memory in MB |
 | `batch` | boolean | `true` | Enable auto-batching |
 | `batchSize` | number | `100` | Maximum batch size |
 | `batchDelay` | number | `50` | Batch delay in ms |
+| `operationTimeout` | number | `30000` | Batch operation timeout in ms |
 
 **Examples:**
 ```javascript
@@ -200,8 +191,8 @@ const db2 = new QuantumDB('data.json');
 const db3 = new QuantumDB('data.db', {
   cache: true,
   cacheSize: 5000,
-  cacheTTL: 60000,        // 1 minute - NEW!
-  cacheMaxMemoryMB: 200   // NEW!
+  cacheTTL: 60000,        // 1 minute
+  cacheMaxMemoryMB: 200
 });
 ```
 
@@ -257,7 +248,166 @@ const all = await db.getAll();
 
 ---
 
-### Query Builder (New in v6.2.0)
+### Bulk Operations
+
+Bulk operations allow you to perform multiple operations efficiently in a single transaction.
+
+#### `bulkSet(entries)`
+Set multiple key-value pairs at once.
+
+**Parameters:**
+- `entries` (Array): Array of `{key, value}` objects
+
+**Example:**
+```javascript
+await db.bulkSet([
+  { key: 'user:1', value: { name: 'Ahmed', age: 25 } },
+  { key: 'user:2', value: { name: 'Sara', age: 30 } },
+  { key: 'user:3', value: { name: 'Omar', age: 28 } }
+]);
+```
+
+**Use cases:**
+- Importing data from external sources
+- Initializing database with seed data
+- Batch updates from API responses
+
+#### `bulkDelete(keys)`
+Delete multiple keys at once.
+
+**Parameters:**
+- `keys` (Array): Array of key strings
+
+**Example:**
+```javascript
+await db.bulkDelete(['user:1', 'user:2', 'user:3']);
+
+// Delete all users
+const userKeys = await db.startsWith('user:');
+await db.bulkDelete(userKeys);
+```
+
+**Use cases:**
+- Cleanup operations
+- Deleting multiple related records
+- Data pruning
+
+**Performance:**
+- Bulk operations are ~10x faster than individual operations
+- Uses transactions (SQLite) or single write (JSON)
+- Automatically batched if batching is enabled
+
+**Comparison:**
+```javascript
+// ❌ Slow - Individual operations
+for (const user of users) {
+  await db.set(`user:${user.id}`, user);
+}
+
+// ✅ Fast - Bulk operation
+await db.bulkSet(users.map(u => ({
+  key: `user:${u.id}`,
+  value: u
+})));
+```
+
+---
+
+### Find Operations
+
+Search and filter keys in the database.
+
+#### `findKeys(pattern)`
+Find all keys matching a RegExp pattern.
+
+**Parameters:**
+- `pattern` (RegExp): Regular expression to match keys
+
+**Returns:** Array of matching keys
+
+**Example:**
+```javascript
+// Find all user keys
+const userKeys = await db.findKeys(/^user:/);
+
+// Find numeric IDs
+const numericKeys = await db.findKeys(/^user:\d+$/);
+
+// Find specific patterns
+const adminKeys = await db.findKeys(/^user:admin-/);
+```
+
+#### `startsWith(prefix)`
+Find all keys starting with a prefix.
+
+**Parameters:**
+- `prefix` (string): Prefix to match
+
+**Returns:** Array of matching keys
+
+**Example:**
+```javascript
+// Find all keys with prefix
+const userKeys = await db.startsWith('user:');
+const configKeys = await db.startsWith('config:');
+
+// Use with bulkDelete
+const keys = await db.startsWith('temp:');
+await db.bulkDelete(keys);
+```
+
+**Performance tip:** `startsWith()` is faster than `findKeys()` for simple prefix matching.
+
+---
+
+### Stream Operations
+
+For working with large datasets efficiently.
+
+#### `stream()`
+Stream all entries without loading everything into memory.
+
+**Returns:** AsyncGenerator yielding `{key, value}` objects
+
+**Example:**
+```javascript
+// Process large dataset
+for await (const { key, value } of db.stream()) {
+  console.log(`${key}: ${value}`);
+  
+  // Process without loading all data
+  if (needsUpdate(value)) {
+    await db.set(key, update(value));
+  }
+}
+
+// Count entries
+let count = 0;
+for await (const entry of db.stream()) {
+  count++;
+}
+console.log(`Total entries: ${count}`);
+
+// Filter and collect
+const filtered = [];
+for await (const { key, value } of db.stream()) {
+  if (key.startsWith('user:') && value.active) {
+    filtered.push(value);
+  }
+}
+```
+
+**Use cases:**
+- Processing millions of records
+- Data migrations
+- Analytics on large datasets
+- Memory-efficient operations
+
+**Note:** For complex filtering, use Query Builder instead.
+
+---
+
+### Query Builder (New in v6.2.x)
 
 The Query Builder provides an intuitive interface for complex queries with filtering, sorting, and pagination.
 
@@ -489,6 +639,104 @@ async function getPage(pageNumber, pageSize = 10) {
 }
 ```
 
+#### Return Format
+
+Query Builder returns results in different formats depending on the stored data type:
+
+**For Objects:**
+```javascript
+// Stored data
+await db.set('user:1', { name: 'Ahmed', age: 25 });
+
+// Query result
+const results = await db.query().prefix('user:').get();
+// [{ key: 'user:1', name: 'Ahmed', age: 25 }]
+```
+
+**For Primitive Values:**
+```javascript
+// Stored data
+await db.set('count:1', 100);
+await db.set('name', 'test');
+
+// Query result
+const results = await db.query().prefix('count:').get();
+// [{ key: 'count:1', value: 100 }]
+```
+
+**Important Notes:**
+- Objects are spread: `{ key, ...objectProperties }`
+- Primitives use `value` property: `{ key, value: primitiveValue }`
+- Arrays are treated as primitives: `{ key, value: [...] }`
+
+#### Query Builder Performance Tips
+
+**1. Use prefix() for better performance:**
+```javascript
+// ✅ Fast - Uses prefix filter
+await db.query()
+  .prefix('user:')
+  .where('age', '>', 18)
+  .get();
+
+// ❌ Slower - Scans all keys
+await db.query()
+  .where('age', '>', 18)
+  .get();
+```
+
+**2. Limit results early:**
+```javascript
+// ✅ Good - Stops early without sorting
+await db.query()
+  .prefix('user:')
+  .limit(10)
+  .get();
+
+// ⚠️ Slower - Sorts all results first
+await db.query()
+  .prefix('user:')
+  .sort('age')
+  .limit(10)
+  .get();
+```
+
+**3. Use count() instead of get().length:**
+```javascript
+// ✅ Fast - Counts without building result array
+const total = await db.query()
+  .prefix('user:')
+  .count();
+
+// ❌ Slower - Builds full array
+const total = (await db.query().prefix('user:').get()).length;
+```
+
+**4. Use exists() to check for matches:**
+```javascript
+// ✅ Fast - Stops at first match
+const hasAdmins = await db.query()
+  .where('role', '=', 'admin')
+  .exists();
+
+// ❌ Slower - Gets all results
+const hasAdmins = (await db.query().where('role', '=', 'admin').get()).length > 0;
+```
+
+**5. Select only needed fields:**
+```javascript
+// ✅ Good - Returns only needed data
+const emails = await db.query()
+  .prefix('user:')
+  .select(['email'])
+  .get();
+
+// ❌ Returns all fields
+const users = await db.query()
+  .prefix('user:')
+  .get();
+```
+
 ---
 
 ### Array Operations
@@ -531,7 +779,7 @@ await db.subtract('balance', 25);
 
 ---
 
-### Transactions (New in v6.2.0)
+### Transactions (New in v6.2.x)
 
 ACID-compliant transactions for SQLite backend.
 
@@ -573,7 +821,7 @@ await db.transaction(async (tx) => {
 
 ---
 
-### Backup & Restore (New in v6.2.0)
+### Backup & Restore (New in v6.2.x)
 
 #### `backup(backupPath)`
 Create a backup of the database.
@@ -588,6 +836,8 @@ console.log(result);
 //   size: 102400
 // }
 ```
+
+**Note:** Relative paths (e.g., `./backup.json`) are resolved from the current working directory. The returned `path` field contains the absolute path.
 
 #### `restore(backupPath, options)`
 Restore database from backup.
@@ -610,7 +860,7 @@ console.log(backups);
 //   {
 //     file: 'backup-2024-12-29.json',
 //     path: '/full/path/to/backup-2024-12-29.json',
-//     version: '6.2.0',
+//     version: '<package version>',
 //     timestamp: '2024-12-29T10:30:00.000Z',
 //     entries: 1000,
 //     size: 102400
@@ -620,7 +870,7 @@ console.log(backups);
 
 ---
 
-### Watchers & Events (New in v6.2.0)
+### Watchers & Events (New in v6.2.x)
 
 Monitor database changes in real-time.
 
@@ -728,6 +978,80 @@ console.log(stats);
 //   batchQueue: 5,
 //   watchers: 3                  // NEW
 // }
+```
+
+#### `flush()`
+Force flush pending batch operations.
+
+**Use cases:**
+- Before transactions
+- Before backup
+- When you need immediate writes
+
+```javascript
+// Ensure all writes are persisted
+await db.flush();
+
+// Before critical operation
+await db.flush();
+await db.backup('./backup.json');
+```
+
+**Note:** Automatically called before transactions and destroy.
+
+#### `resetStats()`
+Reset database statistics counters.
+
+```javascript
+db.resetStats();
+
+// Stats reset to zero
+const stats = db.getStats();
+// { reads: 0, writes: 0, deletes: 0, ... }
+```
+
+#### `clearCache()`
+Clear all cached entries.
+
+**Use cases:**
+- Memory management
+- After bulk operations
+- Testing
+
+```javascript
+// Clear cache to free memory
+db.clearCache();
+
+// Cache is empty but data still in database
+const value = await db.get('key'); // Re-fetches from database
+```
+
+#### `destroy(options)`
+Cleanup and close database connection.
+
+**Parameters:**
+- `options.flush` (boolean): Flush pending operations before destroy (default: true)
+
+```javascript
+// Graceful shutdown
+await db.destroy();
+
+// Fast shutdown without flushing
+await db.destroy({ flush: false });
+```
+
+**Important:** Always call `destroy()` before process exit to:
+- Flush pending writes
+- Close database connections
+- Clean up resources
+- Stop background tasks
+
+**Example:**
+```javascript
+process.on('SIGINT', async () => {
+  await db.destroy();
+  process.exit(0);
+});
 ```
 
 ---
@@ -863,43 +1187,9 @@ const topPages = await db.query()
 
 ---
 
-## ✅ Testing
-
-QuantumDB v6.2.0 includes a comprehensive test suite with >80% code coverage.
-
-### Running Tests
-
-```bash
-# Install dev dependencies
-npm install
-
-# Run all tests
-npm test
-
-# Run specific test suites
-npm run test:unit          # Unit tests
-npm run test:integration   # Integration tests
-npm run test:performance   # Performance tests
-
-# Watch mode (for development)
-npm run test:watch
-
-# Generate coverage report
-npm run test:coverage
-```
-
-### Test Coverage
-
-- **170+ test cases** covering all functionality
-- **Unit tests:** Cache, Batch, Query Builder
-- **Integration tests:** Transactions, Cache consistency
-- **Performance tests:** Benchmarks and memory tests
-
----
-
 ## ⚡ Performance
 
-### Benchmarks (v6.2.0)
+### Benchmarks (v6.2.x)
 
 ```
 Cache Operations:
@@ -963,6 +1253,155 @@ const db = new QuantumDB('data.db', {
   cacheTTL: 300000,       // 5 minutes
   cacheMaxMemoryMB: 200
 });
+```
+
+---
+
+## ⚙️ Limits and Constraints
+
+### Key Constraints
+- **Maximum key length:** 256 characters
+- **Invalid characters:** Keys cannot contain `"`, `'`, `;`, or `\`
+- **Format:** Must be non-empty string
+
+### Value Constraints
+- **Type:** Any serializable JavaScript value
+- **Not allowed:** `undefined`, functions, symbols
+- **Supported types:** Strings, numbers, booleans, objects, arrays, Date, RegExp, Set, Map, Buffer, BigInt
+
+### Database Constraints
+- **SQLite:**
+  - Maximum database size depends on disk space
+  - Recommended for production use
+  - Supports transactions
+  
+- **JSON:**
+  - Entire database loaded into memory
+  - Recommended for small datasets (<10MB)
+  - No transaction support
+  
+### Cache Constraints
+- **Default cache size:** 1,000 entries
+- **Default max memory:** 100 MB
+- **Can be configured** via `cacheSize` and `cacheMaxMemoryMB` options
+- **Namespace support:** Cache can be isolated using namespace option (internal use)
+
+**Note:** The cache namespace feature is available internally through the CacheManager class but is not directly exposed in the main QuantumDB API. It is designed for advanced use cases where multiple isolated cache instances are needed.
+
+### Performance Guidelines
+- **Small datasets (<1,000 entries):** Both backends work well
+- **Medium datasets (1,000-100,000 entries):** Use SQLite
+- **Large datasets (>100,000 entries):** Use SQLite + streaming operations
+- **Memory usage:** With caching enabled, expect ~100MB + data size
+
+### Backup Limitations
+- **Streaming backup:** Handles databases of any size
+- **Memory-efficient:** Does not load entire database into memory
+- **Large databases (>1GB):** Backup may take several minutes depending on disk speed
+- **Restore operation:** Still loads backup file into memory - may require significant RAM for very large backups
+
+---
+
+## ⚠️ Error Types
+
+QuantumDB throws specific error types for different failure scenarios:
+
+### InvalidKey
+Thrown when a key is invalid:
+- Empty or non-string keys
+- Keys containing invalid characters: `"`, `'`, `;`, `\`, `/`, null bytes, control characters
+- Keys longer than 256 characters
+
+```javascript
+try {
+  await db.set('', 'value');
+} catch (error) {
+  console.log(error.name); // 'InvalidKey'
+  console.log(error.message); // 'Key must be a non-empty string'
+}
+```
+
+### InvalidValue
+Thrown when a value cannot be stored:
+- `undefined` values
+- Functions
+- Symbols
+- Circular references
+
+```javascript
+try {
+  await db.set('key', undefined);
+} catch (error) {
+  console.log(error.name); // 'InvalidValue'
+}
+```
+
+### ReadError
+Thrown when reading from database fails:
+- File system permission errors
+- Corrupted database files
+- Disk I/O errors
+
+```javascript
+try {
+  const value = await db.get('key');
+} catch (error) {
+  console.log(error.name); // 'ReadError'
+}
+```
+
+### WriteError
+Thrown when writing to database fails:
+- Disk full
+- Permission denied
+- File system errors
+
+```javascript
+try {
+  await db.set('key', 'value');
+} catch (error) {
+  console.log(error.name); // 'WriteError'
+}
+```
+
+### NotArrayError
+Thrown when array operation is performed on non-array value:
+
+```javascript
+await db.set('key', 'string');
+try {
+  await db.pull('key', 'value');
+} catch (error) {
+  console.log(error.name); // 'NotArrayError'
+}
+```
+
+### InvalidNumberError
+Thrown when mathematical operation is performed on non-number:
+
+```javascript
+await db.set('key', 'string');
+try {
+  await db.add('key', 5);
+} catch (error) {
+  console.log(error.name); // 'InvalidNumberError'
+}
+```
+
+### TransactionError
+Thrown when transaction fails:
+- Using transactions with JSON backend
+- Transaction callback throws an error
+- Database connection issues during transaction
+
+```javascript
+try {
+  await db.transaction(async (tx) => {
+    throw new Error('Something went wrong');
+  });
+} catch (error) {
+  console.log(error.name); // 'TransactionError'
+}
 ```
 
 ---
@@ -1049,12 +1488,12 @@ setInterval(async () => {
 
 ### No Breaking Changes!
 
-v6.2.0 is **100% backward compatible** with v6.0.0. All existing code continues to work.
+v6.2.x is **100% backward compatible** with v6.0.0. All existing code continues to work.
 
 ### Simple Upgrade
 
 ```bash
-npm install qd.db@6.2.0
+npm install qd.db@6.2
 ```
 
 ### What You Get
@@ -1083,7 +1522,7 @@ await db.set('user:1', { name: 'Ahmed' });
 const user = await db.get('user:1');
 ```
 
-**Still works in v6.2.0!** Plus you can optionally add:
+**Still works in v6.2.x!** Plus you can optionally add:
 
 ```javascript
 // NEW: Query Builder
@@ -1108,14 +1547,13 @@ db.watch('user:*', (event) => {
 
 ### Performance Comparison
 
-| Feature | v6.0.0 | v6.2.0 | Improvement |
+| Feature | v6.0.0 | v6.2.x | Improvement |
 |---------|--------|--------|-------------|
 | **Cache Operations** | O(n) | O(1) | 10,000x faster |
 | **Memory Leaks** | ❌ Yes | ✅ None | Fixed |
 | **Race Conditions** | ❌ Present | ✅ Fixed | 100% |
 | **Transactions** | ❌ None | ✅ ACID | New |
 | **Query Builder** | ❌ None | ✅ Full | New |
-| **Test Coverage** | 0% | >80% | Complete |
 
 ---
 
@@ -1127,23 +1565,21 @@ db.watch('user:*', (event) => {
 A: Use SQLite for better performance and transactions. Use JSON only for small datasets or when you need human-readable files.
 
 **Q: Can I use this in production?**  
-A: Yes! QuantumDB v6.2.0 is production-ready with:
-- Comprehensive test suite (170+ tests)
-- >80% code coverage
+A: Yes! QuantumDB v6.2.x is production-ready with:
 - Battle-tested error handling
 - ACID-compliant transactions
 - No known bugs
 
-**Q: Is v6.2.0 stable?**  
+**Q: Is v6.2.x stable?**  
 A: Absolutely! It's been thoroughly tested and includes fixes for all known issues in v6.0.0.
 
 ### Migration Questions
 
 **Q: Will upgrading from v6.0.0 break my code?**  
-A: No! v6.2.0 is 100% backward compatible. All v6.0.0 code works without changes.
+A: No! v6.2.x is 100% backward compatible. All v6.0.0 code works without changes.
 
 **Q: Do I need to change my database files?**  
-A: No. Your existing database files work perfectly with v6.2.0.
+A: No. Your existing database files work perfectly with v6.2.x.
 
 **Q: Can I rollback to v6.0.0 if needed?**  
 A: Yes, but you'll lose the new features. Database files remain compatible.
@@ -1176,7 +1612,7 @@ const db = new QuantumDB('data.db', {
 });
 ```
 
-**Q: How much faster is v6.2.0 than v6.0.0?**  
+**Q: How much faster is v6.2.x than v6.0.0?**  
 A: Cache operations are **10,000x faster** (O(1) vs O(n)). Overall performance is significantly better across all operations.
 
 ---
