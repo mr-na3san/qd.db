@@ -12,9 +12,47 @@ class Serializer {
     if (value === undefined) {
       return JSON.stringify({ __type: 'undefined' });
     }
+    
+    if (typeof value === 'function') {
+      throw new Error('Functions cannot be serialized');
+    }
+    
+    if (typeof value === 'symbol') {
+      throw new Error('Symbols cannot be serialized');
+    }
+    
+    if (typeof value === 'object' && value !== null && !Buffer.isBuffer(value)) {
+      if (this.hasCircularReference(value)) {
+        throw new Error('Circular references are not supported');
+      }
+    }
+    
+    if (value instanceof Error) {
+      return JSON.stringify({
+        __type: 'Error',
+        name: value.name,
+        message: value.message,
+        stack: value.stack
+      });
+    }
 
     if (value instanceof Date) {
+      if (isNaN(value.getTime())) {
+        throw new Error('Invalid Date object');
+      }
       return JSON.stringify({ __type: 'Date', value: value.toISOString() });
+    }
+    
+    if (typeof value === 'number') {
+      if (Number.isNaN(value)) {
+        return JSON.stringify({ __type: 'NaN' });
+      }
+      if (value === Infinity) {
+        return JSON.stringify({ __type: 'Infinity' });
+      }
+      if (value === -Infinity) {
+        return JSON.stringify({ __type: '-Infinity' });
+      }
     }
 
     if (value instanceof RegExp) {
@@ -32,13 +70,25 @@ class Serializer {
     if (Buffer.isBuffer(value)) {
       return JSON.stringify({ __type: 'Buffer', value: value.toString('base64') });
     }
+    
+    if (value instanceof DataView) {
+      const buffer = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+      return JSON.stringify({
+        __type: 'DataView',
+        value: Buffer.from(buffer).toString('base64')
+      });
+    }
+    
+    if (ArrayBuffer.isView(value)) {
+      return JSON.stringify({
+        __type: 'TypedArray',
+        arrayType: value.constructor.name,
+        value: Array.from(value)
+      });
+    }
 
     if (typeof value === 'bigint') {
       return JSON.stringify({ __type: 'BigInt', value: value.toString() });
-    }
-
-    if (typeof value === 'function') {
-      throw new Error('Functions cannot be serialized');
     }
 
     try {
@@ -49,6 +99,36 @@ class Serializer {
       }
       throw error;
     }
+  }
+
+  static hasCircularReference(obj, seen = new WeakSet()) {
+    if (typeof obj !== 'object' || obj === null) {
+      return false;
+    }
+    
+    if (seen.has(obj)) {
+      return true;
+    }
+    
+    seen.add(obj);
+    
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        if (this.hasCircularReference(item, seen)) {
+          return true;
+        }
+      }
+    } else {
+      for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+          if (this.hasCircularReference(obj[key], seen)) {
+            return true;
+          }
+        }
+      }
+    }
+    
+    return false;
   }
 
   /**
@@ -66,6 +146,18 @@ class Serializer {
             return null;
           case 'undefined':
             return undefined;
+          case 'NaN':
+            return NaN;
+          case 'Infinity':
+            return Infinity;
+          case '-Infinity':
+            return -Infinity;
+          case 'Error': {
+            const error = new Error(parsed.message);
+            error.name = parsed.name;
+            error.stack = parsed.stack;
+            return error;
+          }
           case 'Date':
             return new Date(parsed.value);
           case 'RegExp':
@@ -76,6 +168,30 @@ class Serializer {
             return new Map(parsed.value);
           case 'Buffer':
             return Buffer.from(parsed.value, 'base64');
+          case 'DataView': {
+            const buffer = Buffer.from(parsed.value, 'base64');
+            return new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+          }
+          case 'TypedArray': {
+            const typedArrayMap = {
+              'Int8Array': Int8Array,
+              'Uint8Array': Uint8Array,
+              'Uint8ClampedArray': Uint8ClampedArray,
+              'Int16Array': Int16Array,
+              'Uint16Array': Uint16Array,
+              'Int32Array': Int32Array,
+              'Uint32Array': Uint32Array,
+              'Float32Array': Float32Array,
+              'Float64Array': Float64Array,
+              'BigInt64Array': BigInt64Array,
+              'BigUint64Array': BigUint64Array
+            };
+            const TypedArrayConstructor = typedArrayMap[parsed.arrayType];
+            if (TypedArrayConstructor) {
+              return new TypedArrayConstructor(parsed.value);
+            }
+            return parsed.value;
+          }
           case 'BigInt':
             return BigInt(parsed.value);
         }
@@ -83,6 +199,8 @@ class Serializer {
 
       return parsed;
     } catch (error) {
+      const { defaultLogger } = require('./logger');
+      defaultLogger.debug(`Failed to deserialize value, returning as-is: ${error.message}`);
       return str;
     }
   }
