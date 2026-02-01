@@ -1,3 +1,22 @@
+const memoryEstimationConstants = Object.freeze({
+  stringOverhead: 40,
+  stringCharSize: 2,
+  bufferOverhead: 48,
+  arrayOverhead: 64,
+  objectOverhead: 128,
+  numberSize: 16,
+  booleanSize: 8,
+  fallbackSize: 64,
+  itemOverhead: 16,
+  keyOverhead: 32,
+  maxRecursionDepth: 10,
+  maxSampleSize: 100,
+  maxArraySampleSize: 100,
+  maxObjectSampleSize: 50,
+  averagePropSize: 48,
+  fallbackRecursionSize: 2048
+});
+
 class CacheNode {
   constructor(key, value, expiresAt = null) {
     this.key = key;
@@ -5,24 +24,128 @@ class CacheNode {
     this.expiresAt = expiresAt;
     this.prev = null;
     this.next = null;
-    this.size = this.estimateSize(value);
+    this.size = this.estimateSize(key, value);
   }
 
-  estimateSize(value) {
+  estimateSize(key, value) {
+    const {
+      stringOverhead,
+      stringCharSize,
+      bufferOverhead,
+      arrayOverhead,
+      objectOverhead,
+      numberSize,
+      booleanSize,
+      fallbackSize
+    } = memoryEstimationConstants;
+    
+    let size = 0;
+    
+    if (typeof key === 'string') {
+      size += key.length * stringCharSize + stringOverhead;
+    }
+    
     if (Buffer.isBuffer(value)) {
-      return value.length;
+      return size + value.length + bufferOverhead;
     }
     if (typeof value === 'string') {
-      return value.length * 2;
+      return size + (value.length * stringCharSize) + bufferOverhead;
+    }
+    if (Array.isArray(value)) {
+      try {
+        size += this.estimateArraySize(value, 0);
+      } catch {
+        size += 2048;
+      }
+      return size + arrayOverhead;
     }
     if (typeof value === 'object' && value !== null) {
       try {
-        return JSON.stringify(value).length * 2;
+        size += this.estimateObjectSize(value, 0);
       } catch {
-        return 1024;
+        size += 2048;
+      }
+      return size + objectOverhead;
+    }
+    if (typeof value === 'number') {
+      if (Number.isNaN(value) || !Number.isFinite(value)) {
+        return size + numberSize;
+      }
+      return size + numberSize;
+    }
+    if (typeof value === 'boolean') {
+      return size + booleanSize;
+    }
+    return size + fallbackSize;
+  }
+
+  estimateArraySize(arr, depth) {
+    const {
+      maxRecursionDepth,
+      itemOverhead,
+      stringCharSize,
+      maxArraySampleSize,
+      fallbackRecursionSize
+    } = memoryEstimationConstants;
+    
+    if (depth > maxRecursionDepth) return fallbackRecursionSize;
+    
+    let size = arr.length * itemOverhead;
+    const sampleSize = Math.min(arr.length, maxArraySampleSize);
+    
+    for (let i = 0; i < sampleSize; i++) {
+      const item = arr[i];
+      if (typeof item === 'string') {
+        size += item.length * stringCharSize;
+      } else if (typeof item === 'object' && item !== null) {
+        size += this.estimateObjectSize(item, depth + 1);
+      } else {
+        size += itemOverhead;
       }
     }
-    return 64;
+    
+    if (arr.length > maxArraySampleSize) {
+      size += (arr.length - maxArraySampleSize) * itemOverhead;
+    }
+    return size;
+  }
+
+  estimateObjectSize(obj, depth) {
+    const {
+      maxRecursionDepth,
+      keyOverhead,
+      stringCharSize,
+      itemOverhead,
+      maxObjectSampleSize,
+      averagePropSize,
+      fallbackRecursionSize
+    } = memoryEstimationConstants;
+    
+    if (depth > maxRecursionDepth) return fallbackRecursionSize;
+    
+    const keys = Object.keys(obj);
+    let size = keys.length * keyOverhead;
+    const sampleSize = Math.min(keys.length, maxObjectSampleSize);
+    
+    for (let i = 0; i < sampleSize; i++) {
+      const key = keys[i];
+      size += key.length * stringCharSize;
+      const value = obj[key];
+      if (typeof value === 'string') {
+        size += value.length * stringCharSize;
+      } else if (Array.isArray(value)) {
+        size += this.estimateArraySize(value, depth + 1);
+      } else if (typeof value === 'object' && value !== null) {
+        size += this.estimateObjectSize(value, depth + 1);
+      } else {
+        size += itemOverhead;
+      }
+    }
+    
+    if (keys.length > maxObjectSampleSize) {
+      size += (keys.length - maxObjectSampleSize) * averagePropSize;
+    }
+    return size;
   }
 
   isExpired() {
@@ -42,6 +165,20 @@ class CacheManager {
     this.maxSize = options.maxSize || 1000;
     this.ttl = options.ttl || 0;
     this.maxMemoryBytes = (options.maxMemoryMB || 100) * 1024 * 1024;
+    this.namespace = options.namespace || '';
+    
+    if (this.maxSize < 1) {
+      throw new Error('maxSize must be positive');
+    }
+    if (this.ttl < 0) {
+      throw new Error('ttl cannot be negative');
+    }
+    if (this.maxMemoryBytes < 0) {
+      throw new Error('maxMemoryMB cannot be negative');
+    }
+    if (this.namespace && typeof this.namespace !== 'string') {
+      throw new TypeError('namespace must be a string');
+    }
     
     this.cache = new Map();
     this.head = new CacheNode(null, null);
@@ -58,6 +195,10 @@ class CacheManager {
     if (this.ttl > 0) {
       this.startCleanupInterval();
     }
+  }
+
+  getNamespacedKey(key) {
+    return this.namespace ? `${this.namespace}:${key}` : key;
   }
 
   /**
@@ -103,24 +244,30 @@ class CacheManager {
     return node;
   }
 
-  /**
-   * Evict entries until constraints are met
-   * @private
-   */
   evictIfNeeded() {
+    const maxEvictionAttempts = 1000;
+    let attempts = 0;
+    
     while (
       (this.cache.size >= this.maxSize || 
        this.currentMemoryBytes >= this.maxMemoryBytes) &&
-      this.cache.size > 0
+      this.cache.size > 0 &&
+      attempts < maxEvictionAttempts
     ) {
       const node = this.removeTail();
       if (node) {
         this.cache.delete(node.key);
-        this.currentMemoryBytes -= node.size;
+        this.currentMemoryBytes = Math.max(0, this.currentMemoryBytes - node.size);
         this.evictions++;
+        attempts++;
       } else {
         break;
       }
+    }
+    
+    if (attempts >= maxEvictionAttempts) {
+      const { defaultLogger } = require('../utils/logger');
+      defaultLogger.warn('Cache eviction limit reached - single item may exceed memory limit');
     }
   }
 
@@ -160,19 +307,25 @@ class CacheManager {
     const effectiveTTL = ttl !== undefined ? ttl : this.ttl;
     const expiresAt = effectiveTTL > 0 ? Date.now() + effectiveTTL : null;
 
-    if (existingNode) {
-      this.currentMemoryBytes -= existingNode.size;
-      existingNode.value = value;
-      existingNode.expiresAt = expiresAt;
-      existingNode.size = existingNode.estimateSize(value);
-      this.currentMemoryBytes += existingNode.size;
-      this.moveToHead(existingNode);
-    } else {
-      const newNode = new CacheNode(key, value, expiresAt);
-      this.cache.set(key, newNode);
-      this.addToHead(newNode);
-      this.currentMemoryBytes += newNode.size;
-      this.evictIfNeeded();
+    try {
+      if (existingNode) {
+        this.currentMemoryBytes -= existingNode.size;
+        existingNode.value = value;
+        existingNode.expiresAt = expiresAt;
+        existingNode.size = Math.max(0, existingNode.estimateSize(key, value));
+        this.currentMemoryBytes += existingNode.size;
+        this.moveToHead(existingNode);
+      } else {
+        const newNode = new CacheNode(key, value, expiresAt);
+        this.cache.set(key, newNode);
+        this.addToHead(newNode);
+        this.currentMemoryBytes += Math.max(0, newNode.size);
+        this.evictIfNeeded();
+      }
+    } catch (error) {
+      const { defaultLogger } = require('../utils/logger');
+      defaultLogger.error('Cache set error:', error.message);
+      throw error;
     }
   }
 
@@ -189,7 +342,7 @@ class CacheManager {
 
     this.removeNode(node);
     this.cache.delete(key);
-    this.currentMemoryBytes -= node.size;
+    this.currentMemoryBytes = Math.max(0, this.currentMemoryBytes - node.size);
     return true;
   }
 
@@ -221,14 +374,25 @@ class CacheManager {
     this.currentMemoryBytes = 0;
   }
 
-  /**
-   * Start cleanup interval for expired entries
-   * @private
-   */
   startCleanupInterval() {
+    const minCleanupIntervalMs = 1000;
+    const maxCleanupIntervalMs = 60000;
+    const ttlDivisor = 10;
+    
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
+    
+    let intervalMs = Math.max(this.ttl / ttlDivisor, minCleanupIntervalMs);
+    intervalMs = Math.min(intervalMs, maxCleanupIntervalMs);
+    
     this.cleanupInterval = setInterval(() => {
       this.cleanupExpired();
-    }, Math.max(this.ttl / 10, 1000));
+    }, intervalMs);
+    
+    if (this.cleanupInterval.unref) {
+      this.cleanupInterval.unref();
+    }
   }
 
   /**
@@ -236,18 +400,23 @@ class CacheManager {
    * @private
    */
   cleanupExpired() {
-    const now = Date.now();
-    let current = this.tail.prev;
-    
-    while (current !== this.head) {
-      const prev = current.prev;
-      if (current.isExpired()) {
-        this.cache.delete(current.key);
-        this.removeNode(current);
-        this.currentMemoryBytes -= current.size;
-        this.expirations++;
+    try {
+      const now = Date.now();
+      let current = this.tail.prev;
+      
+      while (current !== this.head) {
+        const prev = current.prev;
+        if (current.isExpired()) {
+          this.cache.delete(current.key);
+          this.removeNode(current);
+          this.currentMemoryBytes = Math.max(0, this.currentMemoryBytes - current.size);
+          this.expirations++;
+        }
+        current = prev;
       }
-      current = prev;
+    } catch (error) {
+      const { defaultLogger } = require('../utils/logger');
+      defaultLogger.error('Cache cleanup error:', error.message);
     }
   }
 

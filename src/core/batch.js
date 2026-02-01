@@ -1,52 +1,67 @@
+const defaultMaxBatchSize = 100;
+const defaultMaxWaitTimeMs = 50;
+const defaultOperationTimeoutMs = 30000;
+const queueSizeMultiplier = 100;
+const defaultRetryAttempts = 3;
+const initialRetryDelayMs = 100;
+const maxRetryDelayMs = 5000;
+
 class BatchManager {
-  /**
-   * Create batch manager
-   * @param {Function} executeCallback Callback to execute batch
-   * @param {number} maxBatchSize Maximum batch size
-   * @param {number} maxWaitTime Maximum wait time in ms
-   */
-  constructor(executeCallback, maxBatchSize = 100, maxWaitTime = 50) {
+  constructor(executeCallback, maxBatchSize = defaultMaxBatchSize, maxWaitTime = defaultMaxWaitTimeMs, operationTimeout = defaultOperationTimeoutMs, maxQueueSize = null) {
     this.executeCallback = executeCallback;
     this.maxBatchSize = maxBatchSize;
     this.maxWaitTime = maxWaitTime;
+    this.operationTimeout = operationTimeout;
+    this.maxQueueSize = maxQueueSize || (maxBatchSize * queueSizeMultiplier);
     this.queue = [];
     this.timer = null;
     this.isProcessing = false;
     this.processingPromise = null;
+    this.abortController = null;
+    this.retryAttempts = defaultRetryAttempts;
+    this.retryDelay = initialRetryDelayMs;
   }
 
-  /**
-   * Add operation to batch queue
-   * @param {Object} operation Operation to add
-   * @returns {Promise} Promise that resolves when operation completes
-   */
-  add(operation) {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ operation, resolve, reject });
+  async add(operation) {
+    let currentDelay = initialRetryDelayMs;
+    let attempts = 0;
+    
+    while (attempts < this.retryAttempts) {
+      if (this.queue.length < this.maxQueueSize) {
+        return new Promise((resolve, reject) => {
+          this.queue.push({ operation, resolve, reject });
 
-      if (this.queue.length >= this.maxBatchSize) {
-        this.scheduleFlush();
-      } else if (!this.timer && !this.isProcessing) {
-        this.timer = setTimeout(() => this.scheduleFlush(), this.maxWaitTime);
+          if (this.queue.length >= this.maxBatchSize) {
+            this.scheduleFlush();
+          } else if (!this.timer && !this.isProcessing) {
+            this.timer = setTimeout(() => this.scheduleFlush(), this.maxWaitTime);
+          }
+        });
       }
-    });
+      
+      attempts++;
+      if (attempts < this.retryAttempts) {
+        await new Promise(resolve => setTimeout(resolve, currentDelay));
+        currentDelay = Math.min(currentDelay * 2, maxRetryDelayMs);
+      }
+    }
+    
+    throw new Error('Batch queue is full. Too many pending operations.');
   }
 
-  /**
-   * Schedule flush operation
-   * @private
-   */
   async scheduleFlush() {
     if (this.isProcessing) {
-      await this.processingPromise;
+      if (this.processingPromise) {
+        await this.processingPromise;
+      }
+      if (this.queue.length > 0) {
+        return this.flush();
+      }
+      return;
     }
-    await this.flush();
+    return this.flush();
   }
 
-  /**
-   * Flush pending operations
-   * @returns {Promise} Promise that resolves when flush completes
-   */
   async flush() {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -60,17 +75,39 @@ class BatchManager {
     this.isProcessing = true;
     
     const batchSize = Math.min(this.queue.length, this.maxBatchSize);
-    const batch = this.queue.splice(0, batchSize);
+    const batch = this.queue.slice(0, batchSize);
+    this.queue = this.queue.slice(batchSize);
 
     this.processingPromise = (async () => {
+      let timeoutId;
+      let isTimedOut = false;
+      this.abortController = new AbortController();
+      
       try {
-        await this.executeCallback(batch.map(item => item.operation));
-        batch.forEach(item => item.resolve());
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            isTimedOut = true;
+            reject(new Error('Batch operation timeout'));
+          }, this.operationTimeout);
+        });
+        
+        const operationPromise = this.executeCallback(batch.map(item => item.operation));
+        
+        await Promise.race([operationPromise, timeoutPromise]);
+        
+        if (!isTimedOut) {
+          clearTimeout(timeoutId);
+          batch.forEach(item => item.resolve());
+        }
       } catch (error) {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
         batch.forEach(item => item.reject(error));
       } finally {
         this.isProcessing = false;
         this.processingPromise = null;
+        this.abortController = null;
         
         if (this.queue.length > 0) {
           setImmediate(() => this.flush());

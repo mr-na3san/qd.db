@@ -201,14 +201,20 @@ async function clearAll(db, cache = null) {
  */
 async function add(db, key, amount = 1, cache = null) {
   validateKey(key);
-  if (typeof amount !== 'number') throw new InvalidNumberError();
+  if (typeof amount !== 'number' || !isFinite(amount)) {
+    throw new InvalidNumberError('Amount must be a finite number');
+  }
   
   try {
     const current = await get(db, key, cache);
+    if (current !== undefined && typeof current !== 'number') {
+      throw new InvalidNumberError('Current value must be a number');
+    }
     const newValue = (current || 0) + amount;
     await set(db, key, newValue, cache);
     return newValue;
   } catch (error) {
+    if (error instanceof InvalidNumberError) throw error;
     throw new WriteError(error.message);
   }
 }
@@ -222,14 +228,20 @@ async function add(db, key, amount = 1, cache = null) {
  */
 async function subtract(db, key, amount = 1, cache = null) {
   validateKey(key);
-  if (typeof amount !== 'number') throw new InvalidNumberError();
+  if (typeof amount !== 'number' || !isFinite(amount)) {
+    throw new InvalidNumberError('Amount must be a finite number');
+  }
   
   try {
     const current = await get(db, key, cache);
+    if (current !== undefined && typeof current !== 'number') {
+      throw new InvalidNumberError('Current value must be a number');
+    }
     const newValue = (current || 0) - amount;
     await set(db, key, newValue, cache);
     return newValue;
   } catch (error) {
+    if (error instanceof InvalidNumberError) throw error;
     throw new WriteError(error.message);
   }
 }
@@ -266,8 +278,13 @@ async function findKeys(db, pattern) {
   if (!(pattern instanceof RegExp)) throw new InvalidValue('Pattern must be a RegExp');
   
   try {
-    const data = await db.readData();
-    return Object.keys(data).filter(key => pattern.test(key));
+    const keys = [];
+    for await (const { key } of db.streamEntries()) {
+      if (pattern.test(key)) {
+        keys.push(key);
+      }
+    }
+    return keys;
   } catch (error) {
     throw new ReadError(error.message);
   }
@@ -283,8 +300,13 @@ async function startsWith(db, prefix) {
   validateKey(prefix);
   
   try {
-    const data = await db.readData();
-    return Object.keys(data).filter(key => key.startsWith(prefix));
+    const keys = [];
+    for await (const { key } of db.streamEntries()) {
+      if (key.startsWith(prefix)) {
+        keys.push(key);
+      }
+    }
+    return keys;
   } catch (error) {
     throw new ReadError(error.message);
   }

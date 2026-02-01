@@ -3,11 +3,24 @@ const EventEmitter = require('events');
 class WatcherManager extends EventEmitter {
   /**
    * Create watcher manager
+   * @param {Object} options Options
+   * @param {number} [options.maxWatchers=1000] Maximum number of watchers
    */
-  constructor() {
+  constructor(options = {}) {
     super();
     this.watchers = new Map();
     this.watcherId = 0;
+    this.maxWatchers = options.maxWatchers || 1000;
+    this.watcherErrors = new Map();
+    this.maxErrorsBeforeDisable = options.maxErrorsBeforeDisable || 10;
+    this.watcherCallCounts = new Map();
+    this.rateLimitWindow = options.rateLimitWindow || 1000;
+    this.maxCallsPerWindow = options.maxCallsPerWindow || 1000;
+    
+    this.on('error', (errorInfo) => {
+      const { defaultLogger } = require('../utils/logger');
+      defaultLogger.error('Watcher error:', errorInfo.error.message, 'for key:', errorInfo.key);
+    });
   }
 
   /**
@@ -17,6 +30,22 @@ class WatcherManager extends EventEmitter {
    * @returns {number} Watcher ID
    */
   watch(pattern, callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Callback must be a function');
+    }
+    
+    if (pattern === null || pattern === undefined) {
+      throw new TypeError('Pattern cannot be null or undefined');
+    }
+    
+    if (typeof pattern !== 'string' && !(pattern instanceof RegExp)) {
+      throw new TypeError('Pattern must be a string or RegExp');
+    }
+    
+    if (this.watchers.size >= this.maxWatchers) {
+      throw new Error(`Maximum number of watchers (${this.maxWatchers}) reached`);
+    }
+    
     const id = ++this.watcherId;
     const matcher = this.createMatcher(pattern);
     
@@ -43,32 +72,63 @@ class WatcherManager extends EventEmitter {
    */
   clearWatchers() {
     this.watchers.clear();
+    this.watcherErrors.clear();
+    this.watcherCallCounts.clear();
   }
 
-  /**
-   * Notify watchers of key change
-   * @param {string} event Event type (set, delete, push, pull, add, subtract)
-   * @param {string} key Key that changed
-   * @param {any} value New value
-   * @param {any} oldValue Old value
-   */
   notify(event, key, value, oldValue = undefined) {
+    const now = Date.now();
+    
     for (const [id, watcher] of this.watchers) {
       if (watcher.matcher(key)) {
+        const errorCount = this.watcherErrors.get(id) || 0;
+        if (errorCount >= this.maxErrorsBeforeDisable) {
+          continue;
+        }
+        
+        if (!this.watcherCallCounts.has(id)) {
+          this.watcherCallCounts.set(id, { 
+            calls: [],
+            windowStart: now 
+          });
+        }
+        
+        const callInfo = this.watcherCallCounts.get(id);
+        
+        callInfo.calls = callInfo.calls.filter(
+          timestamp => now - timestamp < this.rateLimitWindow
+        );
+        
+        if (callInfo.calls.length >= this.maxCallsPerWindow) {
+          continue;
+        }
+        
+        callInfo.calls.push(now);
+        
         try {
           watcher.callback({
             event: event,
             key: key,
             value: value,
             oldValue: oldValue,
-            timestamp: Date.now()
+            timestamp: now
           });
         } catch (error) {
+          const newErrorCount = errorCount + 1;
+          this.watcherErrors.set(id, newErrorCount);
+          
           this.emit('error', {
             watcherId: id,
             error: error,
-            key: key
+            key: key,
+            errorCount: newErrorCount,
+            disabled: newErrorCount >= this.maxErrorsBeforeDisable
           });
+          
+          if (newErrorCount >= this.maxErrorsBeforeDisable) {
+            const { defaultLogger } = require('../utils/logger');
+            defaultLogger.warn(`Watcher ${id} disabled after ${newErrorCount} errors`);
+          }
         }
       }
     }
