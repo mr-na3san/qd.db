@@ -5,12 +5,13 @@ const BackupManager = require('./core/backup');
 const WatcherManager = require('./core/watcher');
 const QueryBuilder = require('./core/query');
 const operations = require('./core/operations');
-const { TransactionError } = require('./utils/errors');
+const { TransactionError, NotArrayError } = require('./utils/errors');
+const { defaultLogger } = require('./utils/logger');
 
 const allowedOptions = new Set([
   'cache', 'cacheSize', 'cacheTTL', 'cacheMaxMemoryMB',
-  'batch', 'batchSize', 'batchDelay',
-  'keepConnectionOpen', 'timeout'
+  'batch', 'batchSize', 'batchDelay', 'operationTimeout',
+  'keepConnectionOpen', 'timeout', 'walMode'
 ]);
 
 class QuantumDB {
@@ -25,15 +26,30 @@ class QuantumDB {
    * @param {boolean} [options.batch=true] Enable batch operations
    * @param {number} [options.batchSize=100] Maximum batch size
    * @param {number} [options.batchDelay=50] Batch delay in ms
+   * @param {number} [options.operationTimeout=30000] Batch operation timeout in ms
    * @param {boolean} [options.keepConnectionOpen=true] Keep SQLite connection open
    * @param {number} [options.timeout=5000] Operation timeout in ms
    */
   constructor(filename = 'quantum.sqlite', options = {}) {
+    if (typeof filename !== 'string' || filename.trim() === '') {
+      throw new TypeError('Filename must be a non-empty string');
+    }
+    
+    if (filename.length > 255) {
+      throw new Error('Filename must be 255 characters or less');
+    }
+    
+    const invalidChars = /[\x00-\x1f<>:"|?*]/;
+    if (invalidChars.test(filename)) {
+      throw new Error('Filename contains invalid characters');
+    }
+    
     this.validateOptions(options);
 
     this.db = new DatabaseConnection(filename, {
       keepConnectionOpen: options.keepConnectionOpen ?? true,
-      timeout: options.timeout ?? 5000
+      timeout: options.timeout ?? 5000,
+      walMode: options.walMode ?? true
     });
 
     this.options = {
@@ -44,6 +60,7 @@ class QuantumDB {
       batch: options.batch ?? true,
       batchSize: options.batchSize ?? 100,
       batchDelay: options.batchDelay ?? 50,
+      operationTimeout: options.operationTimeout ?? 30000,
       keepConnectionOpen: options.keepConnectionOpen ?? true,
       timeout: options.timeout ?? 5000
     };
@@ -63,20 +80,27 @@ class QuantumDB {
           await this.db.batchSet(entries);
         },
         this.options.batchSize,
-        this.options.batchDelay
+        this.options.batchDelay,
+        this.options.operationTimeout
       );
     } else {
       this.writeBatch = null;
     }
 
     this.backupManager = new BackupManager(this.db);
-    this.watcherManager = new WatcherManager();
+    this.watcherManager = new WatcherManager({ maxWatchers: 1000 });
 
     this.stats = {
       reads: 0,
       writes: 0,
       deletes: 0,
-      startTime: Date.now()
+      startTime: Date.now(),
+      errors: 0,
+      totalReadTime: 0,
+      totalWriteTime: 0,
+      totalDeleteTime: 0,
+      bytesRead: 0,
+      bytesWritten: 0
     };
   }
 
@@ -90,7 +114,35 @@ class QuantumDB {
     );
     
     if (unknownOptions.length > 0) {
-      console.warn(`[QuantumDB] Unknown options: ${unknownOptions.join(', ')}`);
+      throw new Error(`Unknown options: ${unknownOptions.join(', ')}. Allowed options: ${Array.from(allowedOptions).join(', ')}`);
+    }
+    
+    if (options.cacheSize !== undefined && (!Number.isInteger(options.cacheSize) || options.cacheSize < 1)) {
+      throw new TypeError('cacheSize must be a positive integer');
+    }
+    
+    if (options.cacheTTL !== undefined && (!Number.isInteger(options.cacheTTL) || options.cacheTTL < 0)) {
+      throw new TypeError('cacheTTL must be a non-negative integer');
+    }
+    
+    if (options.cacheMaxMemoryMB !== undefined && (typeof options.cacheMaxMemoryMB !== 'number' || options.cacheMaxMemoryMB <= 0)) {
+      throw new TypeError('cacheMaxMemoryMB must be a positive number');
+    }
+    
+    if (options.batchSize !== undefined && (!Number.isInteger(options.batchSize) || options.batchSize < 1)) {
+      throw new TypeError('batchSize must be a positive integer');
+    }
+    
+    if (options.batchDelay !== undefined && (typeof options.batchDelay !== 'number' || options.batchDelay < 0)) {
+      throw new TypeError('batchDelay must be a non-negative number');
+    }
+    
+    if (options.operationTimeout !== undefined && (!Number.isInteger(options.operationTimeout) || options.operationTimeout < 1)) {
+      throw new TypeError('operationTimeout must be a positive integer');
+    }
+    
+    if (options.timeout !== undefined && (!Number.isInteger(options.timeout) || options.timeout < 1)) {
+      throw new TypeError('timeout must be a positive integer');
     }
   }
 
@@ -110,72 +162,74 @@ class QuantumDB {
    * Set value by key
    * @param {string} key Key to set
    * @param {any} value Value to store
+   * @returns {Promise<void>}
    */
   async set(key, value) {
     this.stats.writes++;
     
     const oldValue = this.cache ? this.cache.get(key) : undefined;
     
+    if (this.writeBatch) {
+      return new Promise((resolve, reject) => {
+        this.writeBatch.add({ key, value })
+          .then(() => {
+            if (this.cache) {
+              this.cache.set(key, value);
+            }
+            this.watcherManager.notify('set', key, value, oldValue);
+            resolve();
+          })
+          .catch(err => reject(err));
+      });
+    }
+    
+    await operations.set(this.db, key, value, null);
     if (this.cache) {
       this.cache.set(key, value);
     }
-    
-    if (this.writeBatch) {
-      const promise = this.writeBatch.add({ key, value }).catch(err => {
-        if (this.cache) {
-          this.cache.delete(key);
-        }
-        throw err;
-      });
-      
-      this.watcherManager.notify('set', key, value, oldValue);
-      return promise;
-    }
-    
-    await operations.set(this.db, key, value, this.cache);
     this.watcherManager.notify('set', key, value, oldValue);
   }
 
-  /**
-   * Push value to array
-   * @param {string} key Array key
-   * @param {any} value Value to push
-   */
   async push(key, value) {
     this.stats.writes++;
     
+    const oldValue = await this.get(key);
+    
     if (this.writeBatch) {
-      const current = await this.get(key);
-      const array = Array.isArray(current) ? current : [];
+      if (oldValue !== undefined && !Array.isArray(oldValue)) {
+        throw new NotArrayError();
+      }
+      const array = Array.isArray(oldValue) ? [...oldValue] : [];
       array.push(value);
       return this.set(key, array);
     }
     
-    const oldValue = await this.get(key);
-    await operations.push(this.db, key, value, this.cache);
+    await operations.push(this.db, key, value, null);
+    if (this.cache) {
+      const current = await operations.get(this.db, key, null);
+      this.cache.set(key, current);
+    }
     this.watcherManager.notify('push', key, value, oldValue);
   }
 
-  /**
-   * Remove value from array
-   * @param {string} key Array key
-   * @param {any} value Value to remove
-   */
   async pull(key, value) {
     this.stats.writes++;
     
+    const oldValue = await this.get(key);
+    
     if (this.writeBatch) {
-      const current = await this.get(key);
-      if (!Array.isArray(current)) {
-        const { NotArrayError } = require('./utils/errors');
+      if (!Array.isArray(oldValue)) {
         throw new NotArrayError();
       }
-      const filtered = current.filter(item => item !== value);
+      const filtered = oldValue.filter(item => item !== value);
       return this.set(key, filtered);
     }
     
-    const oldValue = await this.get(key);
-    await operations.pull(this.db, key, value, this.cache);
+    await operations.pull(this.db, key, value, null);
+    if (this.cache) {
+      const current = await operations.get(this.db, key, null);
+      this.cache.set(key, current);
+    }
     this.watcherManager.notify('pull', key, value, oldValue);
   }
 
@@ -186,7 +240,10 @@ class QuantumDB {
   async delete(key) {
     this.stats.deletes++;
     const oldValue = await this.get(key);
-    await operations.deleteKey(this.db, key, this.cache);
+    await operations.deleteKey(this.db, key, null);
+    if (this.cache) {
+      this.cache.delete(key);
+    }
     this.watcherManager.notify('delete', key, undefined, oldValue);
   }
 
@@ -196,7 +253,10 @@ class QuantumDB {
    */
   async bulkDelete(keys) {
     this.stats.deletes += keys.length;
-    await operations.bulkDelete(this.db, keys, this.cache);
+    await operations.bulkDelete(this.db, keys, null);
+    if (this.cache) {
+      keys.forEach(key => this.cache.delete(key));
+    }
     keys.forEach(key => {
       this.watcherManager.notify('delete', key, undefined);
     });
@@ -207,15 +267,17 @@ class QuantumDB {
    * @param {Array<{key: string, value: any}>} entries Entries to set
    */
   async bulkSet(entries) {
+    if (!Array.isArray(entries)) {
+      throw new TypeError('Entries must be an array');
+    }
     this.stats.writes += entries.length;
     
+    await operations.bulkSet(this.db, entries, null);
     if (this.cache) {
       entries.forEach(({ key, value }) => {
         this.cache.set(key, value);
       });
     }
-    
-    await operations.bulkSet(this.db, entries, this.cache);
     entries.forEach(({ key, value }) => {
       this.watcherManager.notify('set', key, value);
     });
@@ -235,7 +297,10 @@ class QuantumDB {
    */
   async clear() {
     this.stats.deletes++;
-    await operations.clearAll(this.db, this.cache);
+    await operations.clearAll(this.db, null);
+    if (this.cache) {
+      this.cache.clear();
+    }
     this.watcherManager.notify('clear', '*');
   }
 
@@ -256,7 +321,10 @@ class QuantumDB {
     }
     
     const oldValue = await this.get(key);
-    const newValue = await operations.add(this.db, key, amount, this.cache);
+    const newValue = await operations.add(this.db, key, amount, null);
+    if (this.cache) {
+      this.cache.set(key, newValue);
+    }
     this.watcherManager.notify('add', key, newValue, oldValue);
     return newValue;
   }
@@ -278,7 +346,10 @@ class QuantumDB {
     }
     
     const oldValue = await this.get(key);
-    const newValue = await operations.subtract(this.db, key, amount, this.cache);
+    const newValue = await operations.subtract(this.db, key, amount, null);
+    if (this.cache) {
+      this.cache.set(key, newValue);
+    }
     this.watcherManager.notify('subtract', key, newValue, oldValue);
     return newValue;
   }
@@ -320,12 +391,11 @@ class QuantumDB {
     }
   }
 
-  /**
-   * Execute operations in a transaction (SQLite only)
-   * @param {Function} callback Transaction callback
-   * @returns {Promise<any>} Transaction result
-   */
   async transaction(callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Callback must be a function');
+    }
+
     if (this.db.isJSON) {
       throw new TransactionError('Transactions are only supported with SQLite backend');
     }
@@ -341,12 +411,40 @@ class QuantumDB {
       throw new TransactionError('Database connection not available');
     }
 
+    const stmtCache = this.createStatementCache(sqlDb);
+    const modifiedKeys = new Map();
+    const cacheBackup = new Map();
+
     sqlDb.prepare('BEGIN IMMEDIATE').run();
     
-    const txProxy = {
+    const txProxy = this.createTransactionProxy(stmtCache, modifiedKeys, cacheBackup);
+
+    try {
+      const result = await Promise.resolve(callback(txProxy));
+      sqlDb.prepare('COMMIT').run();
+      
+      this.applyCacheUpdates(modifiedKeys);
+      
+      return result;
+    } catch (error) {
+      sqlDb.prepare('ROLLBACK').run();
+      this.restoreCacheBackup(cacheBackup);
+      throw new TransactionError(error.message);
+    }
+  }
+
+  createStatementCache(sqlDb) {
+    return {
+      select: sqlDb.prepare('SELECT value FROM data WHERE key = ?'),
+      insert: sqlDb.prepare('INSERT OR REPLACE INTO data (key, value) VALUES (?, ?)'),
+      delete: sqlDb.prepare('DELETE FROM data WHERE key = ?')
+    };
+  }
+
+  createTransactionProxy(stmtCache, modifiedKeys, cacheBackup) {
+    return {
       get: async (key) => {
-        const stmt = sqlDb.prepare('SELECT value FROM data WHERE key = ?');
-        const row = stmt.get(key);
+        const row = stmtCache.select.get(key);
         if (!row) return undefined;
         const Serializer = require('./utils/serializer');
         return Serializer.deserialize(row.value);
@@ -355,38 +453,52 @@ class QuantumDB {
         const { validateKey, validateValue } = require('./utils/helpers');
         validateKey(key);
         validateValue(value);
-        const Serializer = require('./utils/serializer');
-        const stmt = sqlDb.prepare('INSERT OR REPLACE INTO data (key, value) VALUES (?, ?)');
-        stmt.run(key, Serializer.serialize(value));
         
-        if (this.cache) {
-          this.cache.set(key, value);
+        if (this.cache && !cacheBackup.has(key)) {
+          const oldValue = this.cache.get(key);
+          cacheBackup.set(key, { exists: oldValue !== undefined, value: oldValue });
         }
+        
+        const Serializer = require('./utils/serializer');
+        stmtCache.insert.run(key, Serializer.serialize(value));
+        modifiedKeys.set(key, { operation: 'set', value });
       },
       delete: (key) => {
         const { validateKey } = require('./utils/helpers');
         validateKey(key);
-        const stmt = sqlDb.prepare('DELETE FROM data WHERE key = ?');
-        stmt.run(key);
         
-        if (this.cache) {
-          this.cache.delete(key);
+        if (this.cache && !cacheBackup.has(key)) {
+          const oldValue = this.cache.get(key);
+          cacheBackup.set(key, { exists: oldValue !== undefined, value: oldValue });
         }
+        
+        stmtCache.delete.run(key);
+        modifiedKeys.set(key, { operation: 'delete' });
       }
     };
+  }
 
-    try {
-      const result = await callback(txProxy);
-      sqlDb.prepare('COMMIT').run();
-      return result;
-    } catch (error) {
-      sqlDb.prepare('ROLLBACK').run();
-      
-      if (this.cache) {
-        this.cache.clear();
+  applyCacheUpdates(modifiedKeys) {
+    if (!this.cache) return;
+    
+    for (const [key, data] of modifiedKeys) {
+      if (data.operation === 'set') {
+        this.cache.set(key, data.value);
+      } else if (data.operation === 'delete') {
+        this.cache.delete(key);
       }
-      
-      throw new TransactionError(error.message);
+    }
+  }
+
+  restoreCacheBackup(cacheBackup) {
+    if (!this.cache) return;
+    
+    for (const [key, backup] of cacheBackup) {
+      if (backup.exists) {
+        this.cache.set(key, backup.value);
+      } else {
+        this.cache.delete(key);
+      }
     }
   }
 
@@ -476,7 +588,28 @@ class QuantumDB {
   async warmCache(patterns) {
     if (!this.cache) return;
 
-    const allData = await this.db.readData();
+    if (patterns !== null && patterns !== undefined && 
+        typeof patterns !== 'string' && !Array.isArray(patterns)) {
+      throw new TypeError('Patterns must be a string, array, or null/undefined');
+    }
+    
+    if (Array.isArray(patterns)) {
+      for (const pattern of patterns) {
+        if (typeof pattern !== 'string' && !(pattern instanceof RegExp)) {
+          throw new TypeError('Each pattern must be a string or RegExp');
+        }
+      }
+    }
+
+    if (this.writeBatch) {
+      await this.writeBatch.flush();
+    }
+
+    await this.db.connect();
+    const allData = !this.db.isJSON && this.db.db 
+      ? await this.readDataWithTransaction()
+      : await this.db.readData();
+    
     const entries = Object.entries(allData);
     
     if (!patterns) {
@@ -487,30 +620,63 @@ class QuantumDB {
       return;
     }
 
-    const patternsArray = Array.isArray(patterns) ? patterns : [patterns];
-    const matchers = patternsArray.map(p => {
-      if (typeof p === 'string' && p.includes('*')) {
-        const regexPattern = p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-        return new RegExp(`^${regexPattern}$`);
-      }
-      return p;
-    });
+    const matchers = this.createPatternMatchers(patterns);
 
     for (const [key, value] of entries) {
-      for (const matcher of matchers) {
-        if (typeof matcher === 'string') {
-          if (key === matcher || key.startsWith(matcher)) {
-            this.cache.set(key, value);
-            break;
-          }
-        } else if (matcher instanceof RegExp) {
-          if (matcher.test(key)) {
-            this.cache.set(key, value);
-            break;
-          }
-        }
+      if (this.matchesAnyPattern(key, matchers)) {
+        this.cache.set(key, value);
       }
     }
+  }
+
+  async readDataWithTransaction() {
+    const sqlDb = this.db.db;
+    sqlDb.prepare('BEGIN DEFERRED').run();
+    try {
+      const rows = sqlDb.prepare('SELECT key, value FROM data').all();
+      const data = {};
+      const Serializer = require('./utils/serializer');
+      rows.forEach(row => {
+        data[row.key] = Serializer.deserialize(row.value);
+      });
+      sqlDb.prepare('COMMIT').run();
+      return data;
+    } catch (error) {
+      sqlDb.prepare('ROLLBACK').run();
+      throw error;
+    }
+  }
+
+  createPatternMatchers(patterns) {
+    const patternsArray = Array.isArray(patterns) ? patterns : [patterns];
+    return patternsArray.map(p => this.createSinglePatternMatcher(p));
+  }
+
+  createSinglePatternMatcher(pattern) {
+    if (typeof pattern === 'string' && pattern.includes('*')) {
+      const regexPattern = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+      return new RegExp(`^${regexPattern}$`);
+    }
+    return pattern;
+  }
+
+  matchesAnyPattern(key, matchers) {
+    for (const matcher of matchers) {
+      if (this.matchesSinglePattern(key, matcher)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  matchesSinglePattern(key, matcher) {
+    if (typeof matcher === 'string') {
+      return key === matcher || key.startsWith(matcher);
+    }
+    if (matcher instanceof RegExp) {
+      return matcher.test(key);
+    }
+    return false;
   }
 
   /**
@@ -537,14 +703,33 @@ class QuantumDB {
    */
   getStats() {
     const uptime = Date.now() - this.stats.startTime;
+    const avgReadTime = this.stats.reads > 0 ? (this.stats.totalReadTime / this.stats.reads).toFixed(2) : 0;
+    const avgWriteTime = this.stats.writes > 0 ? (this.stats.totalWriteTime / this.stats.writes).toFixed(2) : 0;
+    const avgDeleteTime = this.stats.deletes > 0 ? (this.stats.totalDeleteTime / this.stats.deletes).toFixed(2) : 0;
+    
     return {
       reads: this.stats.reads,
       writes: this.stats.writes,
       deletes: this.stats.deletes,
+      errors: this.stats.errors,
       uptime: Math.floor(uptime / 1000) + 's',
       cache: this.cache ? this.cache.getStats() : null,
       batchQueue: this.writeBatch ? this.writeBatch.size() : 0,
-      watchers: this.watcherManager.getWatcherCount()
+      watchers: this.watcherManager.getWatcherCount(),
+      performance: {
+        avgReadTimeMs: parseFloat(avgReadTime),
+        avgWriteTimeMs: parseFloat(avgWriteTime),
+        avgDeleteTimeMs: parseFloat(avgDeleteTime),
+        totalReadTimeMs: this.stats.totalReadTime,
+        totalWriteTimeMs: this.stats.totalWriteTime,
+        totalDeleteTimeMs: this.stats.totalDeleteTime
+      },
+      throughput: {
+        bytesRead: this.stats.bytesRead,
+        bytesWritten: this.stats.bytesWritten,
+        readsPerSecond: uptime > 0 ? ((this.stats.reads / uptime) * 1000).toFixed(2) : 0,
+        writesPerSecond: uptime > 0 ? ((this.stats.writes / uptime) * 1000).toFixed(2) : 0
+      }
     };
   }
 
@@ -556,7 +741,13 @@ class QuantumDB {
       reads: 0,
       writes: 0,
       deletes: 0,
-      startTime: Date.now()
+      startTime: Date.now(),
+      errors: 0,
+      totalReadTime: 0,
+      totalWriteTime: 0,
+      totalDeleteTime: 0,
+      bytesRead: 0,
+      bytesWritten: 0
     };
     if (this.cache) {
       this.cache.resetStats();
@@ -593,7 +784,7 @@ class QuantumDB {
     }
 
     this.watcherManager.clearWatchers();
-    this.db.destroy();
+    await this.db.destroy();
   }
 }
 
