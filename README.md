@@ -942,7 +942,7 @@ for await (const { key, value } of db.stream()) {
 }
 ```
 
-#### `warmCache(patterns)` ⭐ NEW
+#### `warmCache(patterns)`
 Pre-load keys into cache.
 
 ```javascript
