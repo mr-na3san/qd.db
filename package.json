@@ -1,6 +1,6 @@
 {
   "name": "qd.db",
-  "version": "6.2.1",
+  "version": "6.2.2",
   "description": "High-performance key-value database with JSON and SQLite support, featuring intelligent caching, batch operations, transactions, backup/restore, query builder, and real-time watchers",
   "main": "index.js",
   "types": "types/index.d.ts",
